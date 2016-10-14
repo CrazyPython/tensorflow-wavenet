@@ -72,6 +72,19 @@ def get_arguments():
         type=str,
         default=None,
         help='The wav file to start generation from')
+    parser.add_argument(
+        '--speaker_id',
+        type=int,
+        default=None,
+        help='The id of the speaker (model must have trained with global \
+            conditioning)'
+    )
+    parser.add_argument(
+        '--speaker_text',
+        type=str,
+        default=None,
+        help='Sample text to be spoken'
+    )
     return parser.parse_args()
 
 
@@ -118,11 +131,34 @@ def main():
         initial_filter_width=wavenet_params['initial_filter_width'])
 
     samples = tf.placeholder(tf.int32)
-
-    if args.fast_generation:
-        next_sample = net.predict_proba_incremental(samples)
+    
+    if args.speaker_id:
+        id_embedded = tf.one_hot([args.speaker_id], net.global_channels, 
+            axis=-1)
     else:
-        next_sample = net.predict_proba(samples)
+        id_embedded = None
+        
+    if args.speaker_text:
+        text = np.reshape(list(args.speaker_text), (1,-1))
+        size = (1, wavenet_params['sample_rate'])
+        text_embedded = tf.string_to_hash_bucket_fast(text,
+            wavenet_params['local_channels'])
+        text_embedded = tf.one_hot(text_embedded, 
+            wavenet_params['local_channels'])
+        
+        # This does a dumb upsampling of text data to audio sample rate
+        # e.g. 'The car' -> 'TTTTTTThhhhhhheeeeee      cccccaaaarrrr'
+        text_embedded = tf.image.resize_images(text_embedded, 
+            size=size, 
+            method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+    else:
+        text_embedded = None
+        
+    if args.fast_generation:
+        next_sample = net.predict_proba_incremental(samples, id_embedded, 
+            text_embedded)
+    else:
+        next_sample = net.predict_proba(samples, id_embedded, text_embedded)
 
     if args.fast_generation:
         sess.run(tf.initialize_all_variables())
@@ -181,6 +217,7 @@ def main():
         prediction = sess.run(outputs, feed_dict={samples: window})[0]
         sample = np.random.choice(
             np.arange(quantization_channels), p=prediction)
+        print(sample)
         waveform.append(sample)
 
         # Show progress only once per second.

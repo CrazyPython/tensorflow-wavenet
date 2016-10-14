@@ -43,7 +43,9 @@ class WaveNetModel(object):
                  quantization_channels=2**8,
                  use_biases=False,
                  scalar_input=False,
-                 initial_filter_width=32):
+                 initial_filter_width=32,
+                 global_channels=256,
+                 local_channels=128):
         '''Initializes the WaveNet model.
 
         Args:
@@ -79,6 +81,8 @@ class WaveNetModel(object):
         self.skip_channels = skip_channels
         self.scalar_input = scalar_input
         self.initial_filter_width = initial_filter_width
+        self.global_channels = global_channels
+        self.local_channels = local_channels
 
         self.variables = self._create_variables()
 
@@ -119,6 +123,24 @@ class WaveNetModel(object):
                             'gate',
                             [self.filter_width,
                              self.residual_channels,
+                             self.dilation_channels])
+                        current['gcond_filter'] = create_variable(
+                            'filter',
+                            [self.global_channels,
+                             self.dilation_channels])
+                        current['gcond_gate'] = create_variable(
+                            'gate',
+                            [self.global_channels,
+                             self.dilation_channels])
+                        current['lcond_filter'] = create_variable(
+                            'filter',
+                            [self.filter_width,
+                             self.local_channels,
+                             self.dilation_channels])
+                        current['lcond_gate'] = create_variable(
+                            'gate',
+                            [self.filter_width,
+                             self.local_channels,
                              self.dilation_channels])
                         current['dense'] = create_variable(
                             'dense',
@@ -175,7 +197,8 @@ class WaveNetModel(object):
             return causal_conv(input_batch, weights_filter, 1)
 
     def _create_dilation_layer(self, input_batch, layer_index, dilation,
-                               in_channels, dilation_channels, skip_channels):
+                               in_channels, dilation_channels, skip_channels, 
+                               global_condition = None, local_condition = None):
         '''Creates a single causal dilated convolution layer.
 
         The layer contains a gated filter that connects to dense output
@@ -198,6 +221,23 @@ class WaveNetModel(object):
         conv_filter = causal_conv(input_batch, weights_filter, dilation)
         conv_gate = causal_conv(input_batch, weights_gate, dilation)
 
+        if global_condition is not None:
+            weights_gcond_filter = variables['gcond_filter']
+            weights_gcond_gate = variables['gcond_gate']
+            conv_filter = conv_filter + \
+                tf.matmul(global_condition, weights_gcond_filter)
+            conv_gate = conv_gate + \
+                tf.matmul(global_condition, weights_gcond_gate)
+            
+        if local_condition is not None:
+            weights_lcond_filter = variables['lcond_filter']
+            weights_lcond_gate = variables['lcond_gate']
+            
+            conv_filter = conv_filter + \
+            causal_conv(local_condition, weights_lcond_filter, dilation)
+            conv_gate = conv_gate + \
+                causal_conv(local_condition, weights_lcond_gate, dilation)
+                
         if self.use_biases:
             filter_bias = variables['filter_bias']
             gate_bias = variables['gate_bias']
@@ -227,6 +267,12 @@ class WaveNetModel(object):
         tf.histogram_summary(layer + '_gate', weights_gate)
         tf.histogram_summary(layer + '_dense', weights_dense)
         tf.histogram_summary(layer + '_skip', weights_skip)
+        if global_condition is not None:
+            tf.histogram_summary(layer + '_gc_filter', weights_gcond_filter)
+            tf.histogram_summary(layer + '_gc_gate', weights_gcond_gate)
+        if local_condition is not None:
+            tf.histogram_summary(layer + '_lc_filter', weights_lcond_filter)
+            tf.histogram_summary(layer + '_lc_gate', weights_lcond_gate)
         if self.use_biases:
             tf.histogram_summary(layer + '_biases_filter', filter_bias)
             tf.histogram_summary(layer + '_biases_gate', gate_bias)
@@ -254,7 +300,8 @@ class WaveNetModel(object):
 
     def _generator_dilation_layer(self, input_batch, state_batch, layer_index,
                                   dilation, in_channels, dilation_channels,
-                                  skip_channels):
+                                  skip_channels, global_condition, 
+                                  local_condition):
         variables = self.variables['dilated_stack'][layer_index]
 
         weights_filter = variables['filter']
@@ -264,6 +311,24 @@ class WaveNetModel(object):
         output_gate = self._generator_conv(
             input_batch, state_batch, weights_gate)
 
+        if global_condition is not None:
+            weights_gcond_filter = variables['gcond_filter']
+            weights_gcond_gate = variables['gcond_gate']
+            output_filter = output_filter + \
+                tf.matmul(global_condition, weights_gcond_filter)
+            output_gate = output_gate + \
+                tf.matmul(global_condition, weights_gcond_gate)
+            
+        if local_condition is not None:
+            weights_lcond_filter = variables['lcond_filter']
+            weights_lcond_gate = variables['lcond_gate']
+            
+            output_filter = output_filter + \
+                causal_conv(local_condition, weights_lcond_filter, dilation)
+            output_gate = output_gate + \
+                causal_conv(local_condition, weights_lcond_gate, dilation)
+        
+        
         if self.use_biases:
             output_filter = output_filter + variables['filter_bias']
             output_gate = output_gate + variables['gate_bias']
@@ -282,7 +347,8 @@ class WaveNetModel(object):
 
         return skip_contribution, input_batch + transformed
 
-    def _create_network(self, input_batch):
+    def _create_network(self, input_batch, global_condition = None, 
+                        local_condition = None):
         '''Construct the WaveNet network.'''
         outputs = []
         current_layer = input_batch
@@ -305,7 +371,7 @@ class WaveNetModel(object):
                     output, current_layer = self._create_dilation_layer(
                         current_layer, layer_index, dilation,
                         self.residual_channels, self.dilation_channels,
-                        self.skip_channels)
+                        self.skip_channels, global_condition, local_condition)
                     outputs.append(output)
 
         with tf.name_scope('postprocessing'):
@@ -337,7 +403,8 @@ class WaveNetModel(object):
 
         return conv2
 
-    def _create_generator(self, input_batch):
+    def _create_generator(self, input_batch, global_condition = None, 
+                          local_condition = None):
         '''Construct an efficient incremental generator.'''
         init_ops = []
         push_ops = []
@@ -381,7 +448,7 @@ class WaveNetModel(object):
                     output, current_layer = self._generator_dilation_layer(
                         current_layer, current_state, layer_index, dilation,
                         self.residual_channels, self.dilation_channels,
-                        self.skip_channels)
+                        self.skip_channels, global_condition, local_condition)
                     outputs.append(output)
         self.init_ops = init_ops
         self.push_ops = push_ops
@@ -426,7 +493,8 @@ class WaveNetModel(object):
             encoded = tf.reshape(encoded, shape)
         return encoded
 
-    def predict_proba(self, waveform, name='wavenet'):
+    def predict_proba(self, waveform, global_condition = None, 
+                      local_condition = None, name='wavenet'):
         '''Computes the probability distribution of the next sample based on
         all samples in the input waveform.
         If you want to generate audio by feeding the output of the network back
@@ -437,7 +505,8 @@ class WaveNetModel(object):
                 encoded = tf.reshape(encoded, [-1, 1])
             else:
                 encoded = self._one_hot(waveform)
-            raw_output = self._create_network(encoded)
+            raw_output = self._create_network(encoded, global_condition, 
+                local_condition)
             out = tf.reshape(raw_output, [-1, self.quantization_channels])
             # Cast to float64 to avoid bug in TensorFlow
             proba = tf.cast(
@@ -448,7 +517,8 @@ class WaveNetModel(object):
                 [1, self.quantization_channels])
             return tf.reshape(last, [-1])
 
-    def predict_proba_incremental(self, waveform, name='wavenet'):
+    def predict_proba_incremental(self, waveform, global_condition = None, 
+                                  local_condition = None, name='wavenet'):
         '''Computes the probability distribution of the next sample
         incrementally, based on a single sample and all previously passed
         samples.'''
@@ -462,7 +532,8 @@ class WaveNetModel(object):
 
             encoded = tf.one_hot(waveform, self.quantization_channels)
             encoded = tf.reshape(encoded, [-1, self.quantization_channels])
-            raw_output = self._create_generator(encoded)
+            raw_output = self._create_generator(encoded, global_condition, 
+                local_condition)
             out = tf.reshape(raw_output, [-1, self.quantization_channels])
             proba = tf.cast(
                 tf.nn.softmax(tf.cast(out, tf.float64)), tf.float32)
@@ -475,6 +546,8 @@ class WaveNetModel(object):
     def loss(self,
              input_batch,
              l2_regularization_strength=None,
+             global_condition=None,
+             local_condition=None,
              name='wavenet'):
         '''Creates a WaveNet network and returns the autoencoding loss.
 
@@ -493,7 +566,28 @@ class WaveNetModel(object):
             else:
                 network_input = encoded
 
-            raw_output = self._create_network(network_input)
+            if global_condition is not None:
+                gc_encoded = tf.one_hot(global_condition, self.global_channels)
+            else:
+                gc_encoded = None
+                
+            if local_condition is not None:
+                size = tf.shape(encoded)[0:2]
+                lc_encoded = tf.string_to_hash_bucket_fast(local_condition, 
+                    self.local_channels)
+                lc_encoded = tf.one_hot(lc_encoded, self.local_channels)
+                
+                # This does a dumb upsampling of text data to audio sample rate
+                # e.g. 'The car' -> 'TTTTTTThhhhhhheeeeee      cccccaaaarrrr'
+                lc_encoded = tf.image.resize_images(lc_encoded, 
+                    size=size, 
+                    method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
+            else:
+                lc_encoded = None
+
+            raw_output = self._create_network(network_input, 
+                global_condition=gc_encoded,
+                local_condition=lc_encoded)
 
             with tf.name_scope('loss'):
                 # Shift original input left by one sample, which means that

@@ -36,7 +36,15 @@ def load_vctk_audio(directory, sample_rate):
         audio = audio.reshape(-1, 1)
         matches = speaker_re.findall(filename)[0]
         speaker_id, recording_id = [int(id_) for id_ in matches]
-        yield audio, speaker_id
+        
+        dirs_vctk_wav48_p, name = os.path.split(filename)
+        dirs_vctk_wav48, p = os.path.split(dirs_vctk_wav48_p)
+        dirs_vctk, wav48 = os.path.split(dirs_vctk_wav48)
+        filename_text = os.path.join(dirs_vctk, 'txt', p, name[:-4] + '.txt')
+        
+        with open(filename_text) as f:
+            text = f.read()
+        yield audio, (filename, speaker_id, list(text))
 
 
 def trim_silence(audio, threshold):
@@ -59,21 +67,37 @@ class AudioReader(object):
                  sample_rate,
                  sample_size=None,
                  silence_threshold=None,
-                 queue_size=256):
+                 queue_size=256,
+                 vctk=False):
         self.audio_dir = audio_dir
         self.sample_rate = sample_rate
         self.coord = coord
         self.sample_size = sample_size
         self.silence_threshold = silence_threshold
+        self.vctk = vctk
         self.threads = []
+        
         self.sample_placeholder = tf.placeholder(dtype=tf.float32, shape=None)
-        self.queue = tf.PaddingFIFOQueue(queue_size,
-                                         ['float32'],
+        self.queue = tf.PaddingFIFOQueue(queue_size, ['float32'],
                                          shapes=[(None, 1)])
+                                         
+        self.id_placeholder = tf.placeholder(dtype=tf.int32, shape=())
+        self.text_placeholder = tf.placeholder(dtype=tf.string, shape=(None,))
+        self.conditions_queue = tf.PaddingFIFOQueue(queue_size, 
+                                         ['int32', 'string'], 
+                                         shapes=[(), (None,)])
+                                         
         self.enqueue = self.queue.enqueue([self.sample_placeholder])
+        self.conditions_enqueue = self.conditions_queue.enqueue([
+                                                    self.id_placeholder, 
+                                                    self.text_placeholder])
 
     def dequeue(self, num_elements):
         output = self.queue.dequeue_many(num_elements)
+        return output
+        
+    def conditions_dequeue(self, num_elements):
+        output = self.conditions_queue.dequeue_many(num_elements)
         return output
 
     def thread_main(self, sess):
@@ -81,8 +105,11 @@ class AudioReader(object):
         stop = False
         # Go through the dataset multiple times
         while not stop:
-            iterator = load_generic_audio(self.audio_dir, self.sample_rate)
-            for audio, filename in iterator:
+            if self.vctk:
+                iterator = load_vctk_audio(self.audio_dir, self.sample_rate)
+            else:
+                iterator = load_generic_audio(self.audio_dir, self.sample_rate)
+            for audio, extra in iterator:
                 if self.coord.should_stop():
                     stop = True
                     break
@@ -93,7 +120,9 @@ class AudioReader(object):
                         print("Warning: {} was ignored as it contains only "
                               "silence. Consider decreasing trim_silence "
                               "threshold, or adjust volume of the audio."
-                              .format(filename))
+                              .format(extra))
+
+                
 
                 if self.sample_size:
                     # Cut samples into fixed size pieces
@@ -103,9 +132,19 @@ class AudioReader(object):
                         sess.run(self.enqueue,
                                  feed_dict={self.sample_placeholder: piece})
                         buffer_ = buffer_[self.sample_size:]
+                        if self.vctk:
+                            filename, user_id, text = extra
+                            sess.run(self.conditions_enqueue,
+                                     feed_dict = {self.id_placeholder: user_id,
+                                                  self.text_placeholder: text})
                 else:
                     sess.run(self.enqueue,
-                             feed_dict={self.sample_placeholder: audio})
+                             feed_dict={self.sample_placeholder: np.reshape(audio, (-1,1))})
+                    if self.vctk:
+                        filename, user_id, text = extra
+                        sess.run(self.conditions_enqueue,
+                                 feed_dict = {self.id_placeholder: user_id,
+                                              self.text_placeholder: text})
 
     def start_threads(self, sess, n_threads=1):
         for _ in range(n_threads):

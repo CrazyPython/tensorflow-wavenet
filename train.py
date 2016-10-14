@@ -23,8 +23,8 @@ BATCH_SIZE = 1
 DATA_DIRECTORY = './VCTK-Corpus'
 LOGDIR_ROOT = './logdir'
 CHECKPOINT_EVERY = 50
-NUM_STEPS = 4000
-LEARNING_RATE = 0.02
+NUM_STEPS = int(1e5)
+LEARNING_RATE = 1e-3
 WAVENET_PARAMS = './wavenet_params.json'
 STARTED_DATESTRING = "{0:%Y-%m-%dT%H-%M-%S}".format(datetime.now())
 SAMPLE_SIZE = 100000
@@ -88,6 +88,8 @@ def get_arguments():
                         default=SGD_MOMENTUM, help='Specify the momentum to be '
                         'used by sgd optimizer. Ignored by the '
                         'adam optimizer.')
+    parser.add_argument('--vctk', dest='vctk', action='store_true', 
+                        default=False, help='Specify using VCTK datset')
     return parser.parse_args()
 
 
@@ -205,9 +207,15 @@ def main():
             coord,
             sample_rate=wavenet_params['sample_rate'],
             sample_size=args.sample_size,
-            silence_threshold=args.silence_threshold)
+            silence_threshold=args.silence_threshold,
+            vctk=args.vctk)
         audio_batch = reader.dequeue(args.batch_size)
-
+        if args.vctk:
+            global_cond, local_cond = reader.conditions_dequeue(args.batch_size)
+        else:
+            global_cond = None
+            local_cond = None
+            
     # Create network.
     net = WaveNetModel(
         batch_size=args.batch_size,
@@ -219,10 +227,17 @@ def main():
         quantization_channels=wavenet_params["quantization_channels"],
         use_biases=wavenet_params["use_biases"],
         scalar_input=wavenet_params["scalar_input"],
-        initial_filter_width=wavenet_params["initial_filter_width"])
+        initial_filter_width=wavenet_params["initial_filter_width"],
+        global_channels=wavenet_params["global_channels"],
+        local_channels=wavenet_params["local_channels"],
+        )
     if args.l2_regularization_strength == 0:
         args.l2_regularization_strength = None
-    loss = net.loss(audio_batch, args.l2_regularization_strength)
+    loss = net.loss(audio_batch, 
+        l2_regularization_strength = args.l2_regularization_strength,
+        global_condition = global_cond,
+        local_condition = local_cond,
+        )
     if args.optimizer == ADAM_OPTIMIZER:
         optimizer = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
     elif args.optimizer == SGD_OPTIMIZER:
@@ -264,7 +279,6 @@ def main():
 
     threads = tf.train.start_queue_runners(sess=sess, coord=coord)
     reader.start_threads(sess)
-
     try:
         last_saved_step = saved_global_step
         for step in range(saved_global_step + 1, args.num_steps):
