@@ -134,12 +134,12 @@ class WaveNetModel(object):
                              self.dilation_channels])
                         current['lcond_filter'] = create_variable(
                             'filter',
-                            [self.filter_width,
+                            [1,
                              self.local_channels,
                              self.dilation_channels])
                         current['lcond_gate'] = create_variable(
                             'gate',
-                            [self.filter_width,
+                            [1,
                              self.local_channels,
                              self.dilation_channels])
                         current['dense'] = create_variable(
@@ -231,11 +231,10 @@ class WaveNetModel(object):
         if local_condition is not None:
             weights_lcond_filter = variables['lcond_filter']
             weights_lcond_gate = variables['lcond_gate']
-            
-            conv_filter = conv_filter + \
-            causal_conv(local_condition, weights_lcond_filter, dilation)
-            conv_gate = conv_gate + \
-                causal_conv(local_condition, weights_lcond_gate, dilation)
+            conv_filter = conv_filter + tf.nn.conv1d(local_condition, 
+                weights_lcond_filter, stride=1, padding='SAME')
+            conv_gate = conv_gate + tf.nn.conv1d(local_condition, 
+                weights_lcond_gate, stride=1, padding='SAME')
                 
         if self.use_biases:
             filter_bias = variables['filter_bias']
@@ -319,10 +318,10 @@ class WaveNetModel(object):
             weights_lcond_filter = variables['lcond_filter']
             weights_lcond_gate = variables['lcond_gate']
             
-            output_filter = output_filter + \
-                causal_conv(local_condition, weights_lcond_filter, dilation)
-            output_gate = output_gate + \
-                causal_conv(local_condition, weights_lcond_gate, dilation)
+            conv_filter = conv_filter + tf.nn.conv1d(local_condition, 
+                weights_lcond_filter, stride=1, padding='SAME')
+            conv_gate = conv_gate + tf.nn.conv1d(local_condition, 
+                weights_lcond_gate, stride=1, padding='SAME')
         
         
         if self.use_biases:
